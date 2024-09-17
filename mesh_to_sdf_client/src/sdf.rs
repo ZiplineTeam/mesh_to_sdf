@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use mesh_to_sdf::SignMethod;
+use rayon::slice::ParallelSliceMut;
 use wgpu::util::DeviceExt;
 
 use crate::passes::sdf_render_pass::SdfRenderPass;
@@ -62,10 +63,8 @@ impl Sdf {
         let now = std::time::Instant::now();
         // sort cells by their distance to surface.
         // used in the voxel render pass to only draw valid cells.
-        let ordered_indices = (0..data.len())
-            .sorted_by(|i, j| data[*i].total_cmp(&data[*j]))
-            .map(|i| i as u32)
-            .collect_vec();
+        let mut ordered_indices = (0..data.len() as u32).collect_vec();
+        ordered_indices.par_sort_by(|i, j| data[*i as usize].total_cmp(&data[*j as usize]));
         log::info!(
             "voxel generation took: {:.3}ms",
             now.elapsed().as_secs_f64() * 1000.0
