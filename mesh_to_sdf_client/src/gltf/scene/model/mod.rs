@@ -262,7 +262,7 @@ impl GltfModel {
             .collect();
 
         // Fill normals
-        let has_normals = reader.read_normals().map_or(false, |normals| {
+        let has_normals = reader.read_normals().is_some_and(|normals| {
             for (i, normal) in normals.enumerate() {
                 vertices[i].normal = Vec3::from(normal).normalize();
             }
@@ -270,7 +270,7 @@ impl GltfModel {
         });
 
         // Fill tangents
-        let has_tangents = reader.read_tangents().map_or(false, |tangents| {
+        let has_tangents = reader.read_tangents().is_some_and(|tangents| {
             for (i, tangent) in tangents.enumerate() {
                 let tangent = Vec4::from(tangent);
                 vertices[i].tangent = tangent.truncate().normalize().extend(tangent.w);
@@ -279,7 +279,7 @@ impl GltfModel {
         });
 
         // Texture coordinates
-        let has_tex_coords = reader.read_tex_coords(0).map_or(false, |tex_coords| {
+        let has_tex_coords = reader.read_tex_coords(0).is_some_and(|tex_coords| {
             for (i, tex_coords) in tex_coords.into_f32().enumerate() {
                 vertices[i].tex_coords = Vec2::from(tex_coords);
             }

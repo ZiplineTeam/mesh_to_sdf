@@ -64,36 +64,17 @@ impl SdfProgram {
             self.ui_model_info(ui);
 
             if ui.button("Open file…").clicked() {
-                if let Some(path) = pollster::block_on(
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("gltf", &["gltf", "glb"])
-                        .pick_file(),
-                ) {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let path = path.inner().to_string().as_string().unwrap();
-                        self.parameters.file_name = Some(path);
-                        if self.load_gltf(device, queue).is_err() {
-                            self.alert_message = Some((
-                                "Failed to load file. Make sure it is a valid gltf file."
-                                    .to_owned(),
-                                web_time::Instant::now(),
-                            ));
-                        }
-                    }
-
-                    // TODO: fix this.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let path = path.inner().to_str().unwrap().to_owned();
-                        self.parameters.file_name = Some(path);
-                        if self.load_gltf(device, queue).is_err() {
-                            self.alert_message = Some((
-                                "Failed to load file. Make sure it is a valid gltf file."
-                                    .to_owned(),
-                                web_time::Instant::now(),
-                            ));
-                        }
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("gltf", &["gltf", "glb"])
+                    .pick_file()
+                {
+                    let path = path.to_str().unwrap().to_owned();
+                    self.parameters.file_name = Some(path);
+                    if self.load_gltf(device, queue).is_err() {
+                        self.alert_message = Some((
+                            "Failed to load file. Make sure it is a valid gltf file.".to_owned(),
+                            web_time::Instant::now(),
+                        ));
                     }
                 }
             }

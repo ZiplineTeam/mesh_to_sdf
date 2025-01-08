@@ -207,7 +207,7 @@ impl SurfaceWrapper {
         self.surface.as_ref()
     }
 
-    fn config(&self) -> &wgpu::SurfaceConfiguration {
+    const fn config(&self) -> &wgpu::SurfaceConfiguration {
         self.config.as_ref().unwrap()
     }
 }
