@@ -337,6 +337,7 @@ mod tests {
 
         let d = x13.dot(&x23);
 
+        #[allow(clippy::suspicious_operation_groupings)]
         let invdet = 1.0 / f32::max(m13 * m23 - d * d, 1e-30);
 
         let a = x13.dot(&x03);

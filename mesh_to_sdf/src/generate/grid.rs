@@ -719,7 +719,7 @@ mod tests {
 
         // Test against generate_sdf
         for (i, (sdf, grid_sdf)) in sdf.iter().zip(grid_sdf.iter()).enumerate() {
-            assert_eq!(sdf, grid_sdf, "i: {}", i);
+            assert_eq!(sdf, grid_sdf, "i: {i}");
         }
     }
 

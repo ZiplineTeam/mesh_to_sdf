@@ -120,6 +120,9 @@ If it's not watertight, you can use `AccelerationMethod::Rtree` instead.
 `Rtree` methods are 3-4x faster than `Bvh` methods for big enough data. On small meshes, the difference is negligible.
 `AccelerationMethod::None` scales really poorly and should be avoided unless for small datasets or if you're really tight on memory.
 
+If you plan on querying points frequently for the same mesh, you can improve efficiency by only building the acceleration structures once via `build_sdf_acceleration`, and storing the returned `SdfAccelerationMesh`.
+These structures can then be used with `query_sdf` to return the SDF for new query points.
+
 ---
 
 ##### Using your favorite library

@@ -6,8 +6,8 @@ use rayon::prelude::*;
 use crate::{geo, Point, Topology};
 
 /// Wrapper around a point to make it compatible with the r-tree.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Hash)]
-pub(super) struct PointWrapper<V>(pub V);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub struct PointWrapper<V>(pub V);
 
 impl<V> rstar::Point for PointWrapper<V>
 where
@@ -45,7 +45,7 @@ where
 
 /// `RtreeNode` is a node for the r-tree acceleration structure.
 #[derive(Clone)]
-struct RtreeNode<V: Point> {
+pub struct RtreeNode<V: Point> {
     vertices: (V, V, V),
     bounding_box: (V, V),
 }
@@ -76,6 +76,16 @@ impl<V: Point> rstar::PointDistance for RtreeNode<V> {
     }
 }
 
+/// Acceleration structure for the r-tree method.
+///
+/// Stores the r-tree acceleration structure.
+/// Used to query the sdf for a given query point via [`query_sdf_rtree`].
+#[derive(Clone)]
+pub struct SdfAccelerationRtree<V: Point> {
+    pub rtree: rstar::RTree<RtreeNode<V>>,
+}
+
+
 /// Generate a signed distance field from a mesh using an r-tree.
 /// Query points are expected to be in the same space as the mesh.
 ///
@@ -90,7 +100,19 @@ pub fn generate_sdf_rtree<V, I>(
     query_points: &[V],
 ) -> Vec<f32>
 where
-    V: Point,
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    let acceleration = build_sdf_acceleration_rtree(vertices, indices);
+    query_sdf_rtree(&acceleration, query_points)
+}
+
+pub fn build_sdf_acceleration_rtree<V, I>(
+    vertices: &[V],
+    indices: Topology<I>
+) -> SdfAccelerationRtree<V>
+where
+    V: Point + 'static,
     I: Copy + Into<u32> + Sync + Send,
 {
     let bvh_nodes = Topology::get_triangles(vertices, indices)
@@ -109,11 +131,20 @@ where
         .collect_vec();
 
     let rtree = rstar::RTree::bulk_load(bvh_nodes);
+    SdfAccelerationRtree { rtree }
+}
 
+pub fn query_sdf_rtree<V>(
+    acceleration: &SdfAccelerationRtree<V>,
+    query_points: &[V],
+) -> Vec<f32>
+where
+    V: Point + 'static,
+{
     query_points
         .par_iter()
         .map(|point| {
-            let nearest = rtree.nearest_neighbor(&PointWrapper(*point));
+            let nearest = acceleration.rtree.nearest_neighbor(&PointWrapper(*point));
             let nearest = nearest.unwrap();
             geo::point_triangle_signed_distance(
                 point,
@@ -157,6 +188,11 @@ mod tests {
             AccelerationMethod::Bvh(SignMethod::Normal),
         );
 
+        let acceleration = build_sdf_acceleration_rtree(
+            &vertices,
+            crate::Topology::TriangleList(Some(indices)),
+        );
+
         for (idx, (rtree, sdf)) in rtree_sdf.iter().zip(sdf.iter()).enumerate() {
             assert!(
                 (rtree - sdf).abs() < 0.01,
@@ -165,6 +201,11 @@ mod tests {
                 rtree,
                 sdf
             );
+        }
+        // Same check but for the acceleration structure.
+        let sdf_acceleration = query_sdf_rtree(&acceleration, &query_points);
+        for (sdf, baseline) in sdf_acceleration.iter().zip(rtree_sdf.iter()) {
+            assert!(sdf == baseline, "{sdf} != {baseline}"); // should be identical - exact same algorithm
         }
     }
 

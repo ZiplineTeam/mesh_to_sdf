@@ -1,11 +1,7 @@
 //! Module containing the `generate_sdf_rtree_bvh` function.
 
-use std::sync::Arc;
-
-use bvh::{bounding_hierarchy::BoundingHierarchy, bvh::Bvh};
+use bvh::bvh::Bvh;
 use itertools::Itertools;
-use parking_lot::Mutex;
-use rayon::prelude::*;
 
 use crate::{geo, Point, Topology};
 
@@ -13,7 +9,7 @@ use super::rtree::PointWrapper;
 
 /// `RtreeBvhNode` is a node for the r-tree and bvh acceleration structures.
 #[derive(Clone)]
-struct RtreeBvhNode<V: Point> {
+pub struct RtreeBvhNode<V: Point> {
     vertices: (V, V, V),
     bounding_box: (V, V),
     node_index: usize,
@@ -71,6 +67,18 @@ impl<V: Point> bvh::bounding_hierarchy::BHShape<f32, 3> for RtreeBvhNode<V> {
     }
 }
 
+/// Acceleration structure for the r-tree and bvh method.
+///
+/// Stores the r-tree and bvh acceleration structures.
+/// Used to query the sdf for a given query point via [`query_sdf_rtree_bvh`].
+#[derive(Clone)]
+pub struct SdfAccelerationRtreeBvh<V: Point> {
+    pub rtree: rstar::RTree<RtreeBvhNode<V>>,
+    pub bvh: Bvh<f32, 3>,
+    pub bvh_nodes: Vec<RtreeBvhNode<V>>,
+    pub vertices: Vec<V>,
+}
+
 /// Generate a signed distance field from a mesh using an r-tree for nearest neighbor search and a bvh for ray intersection.
 /// Query points are expected to be in the same space as the mesh.
 ///
@@ -85,45 +93,64 @@ where
     V: Point + 'static,
     I: Copy + Into<u32> + Sync + Send,
 {
+    build_sdf_acceleration_rtree_bvh(vertices, indices)
+        .map_or_else(std::vec::Vec::new, |acceleration| query_sdf_rtree_bvh(&acceleration, query_points))
+}
+
+pub fn build_sdf_acceleration_rtree_bvh<V, I>(
+    vertices: &[V],
+    indices: Topology<I>,
+) -> Option<SdfAccelerationRtreeBvh<V>>
+where
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
     let rtree_bvh_nodes = Topology::get_triangles(vertices, indices)
-        .map(|triangle| RtreeBvhNode {
-            vertices: (
-                vertices[triangle.0],
-                vertices[triangle.1],
-                vertices[triangle.2],
-            ),
-            node_index: 0,
-            bounding_box: geo::triangle_bounding_box(
-                &vertices[triangle.0],
-                &vertices[triangle.1],
-                &vertices[triangle.2],
-            ),
-        })
-        .collect_vec();
+    .map(|triangle| RtreeBvhNode {
+        vertices: (
+            vertices[triangle.0],
+            vertices[triangle.1],
+            vertices[triangle.2],
+        ),
+        node_index: 0,
+        bounding_box: geo::triangle_bounding_box(
+            &vertices[triangle.0],
+            &vertices[triangle.1],
+            &vertices[triangle.2],
+        ),
+    })
+    .collect_vec();
 
     if rtree_bvh_nodes.is_empty() {
-        return vec![];
+        return None;
     }
 
-    // Since rtree builds in a single thread, we can build both trees at the same time.
-    let bvh_nodes = Arc::new(Mutex::new(rtree_bvh_nodes.clone()));
-    let bvh = {
-        let bvh_nodes = Arc::clone(&bvh_nodes);
-        std::thread::spawn(move || {
-            let mut bvh_nodes = bvh_nodes.lock();
-            Bvh::build_par(&mut bvh_nodes)
-        })
+    // Build both acceleration structures sequentially
+    let mut bvh_nodes = rtree_bvh_nodes.clone();
+    let bvh = Bvh::build(&mut bvh_nodes);
+    let rtree = rstar::RTree::bulk_load(rtree_bvh_nodes);
+
+    let acceleration: SdfAccelerationRtreeBvh<V> = SdfAccelerationRtreeBvh {
+        rtree,
+        bvh,
+        bvh_nodes,
+        vertices: vertices.to_vec(),
     };
 
-    let rtree = rstar::RTree::bulk_load(rtree_bvh_nodes);
-    let bvh = bvh.join().unwrap();
+    Some(acceleration)
+}
 
-    let bvh_nodes = bvh_nodes.lock();
-
+pub fn query_sdf_rtree_bvh<V>(
+    acceleration: &SdfAccelerationRtreeBvh<V>,
+    query_points: &[V],
+) -> Vec<f32>
+where
+    V: Point + 'static,
+{
     query_points
-        .par_iter()
+        .iter()
         .map(|point| {
-            let nearest = rtree.nearest_neighbor(&PointWrapper(*point));
+            let nearest = acceleration.rtree.nearest_neighbor(&PointWrapper(*point));
             let nearest = nearest.unwrap(); // tree isn't empty.
 
             let dist = geo::point_triangle_distance(
@@ -146,7 +173,7 @@ where
                     direction,
                 );
                 let mut intersection_count = 0;
-                let hitcast = bvh.traverse(&ray, &bvh_nodes);
+                let hitcast = acceleration.bvh.traverse(&ray, &acceleration.bvh_nodes);
                 for bvh_node in hitcast {
                     let a = &bvh_node.vertices.0;
                     let b = &bvh_node.vertices.1;
@@ -205,6 +232,13 @@ mod tests {
             AccelerationMethod::Bvh(SignMethod::Raycast),
         );
 
+        let acceleration = build_sdf_acceleration_rtree_bvh(
+            &vertices,
+            crate::Topology::TriangleList(Some(indices)),
+        );
+        assert!(acceleration.is_some());
+        let acceleration = acceleration.unwrap();
+
         for (idx, (rtree, sdf)) in rtree_sdf.iter().zip(sdf.iter()).enumerate() {
             assert!(
                 (rtree - sdf).abs() < 0.01,
@@ -213,6 +247,11 @@ mod tests {
                 rtree,
                 sdf
             );
+        }
+        // Same check but for the acceleration structure.
+        let sdf_acceleration = query_sdf_rtree_bvh(&acceleration, &query_points);
+        for (sdf, baseline) in sdf_acceleration.iter().zip(rtree_sdf.iter()) {
+            assert!(sdf == baseline, "{sdf} != {baseline}"); // should be identical - exact same algorithm
         }
     }
 

@@ -1,5 +1,6 @@
 #[cfg(feature = "serde")]
 use serde::{de::DeserializeOwned, Serialize};
+use core::hash::Hash;
 
 mod impl_array;
 
@@ -138,5 +139,16 @@ pub trait Point: Sized + Copy + Sync + Send + core::fmt::Debug + PartialEq {
             self.y() / other.y(),
             self.z() / other.z(),
         )
+    }
+    /// Check if the point is finite.
+    #[must_use]
+    fn is_finite(&self) -> bool {
+        self.x().is_finite() && self.y().is_finite() && self.z().is_finite()
+    }
+    /// Hash the point.
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.x().to_bits().hash(state);
+        self.y().to_bits().hash(state);
+        self.z().to_bits().hash(state);
     }
 }
