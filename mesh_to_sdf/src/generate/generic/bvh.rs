@@ -348,10 +348,7 @@ mod tests {
             // i: 1742: 0.09342232 -0.094851956
             assert!(
                 (sdf - grid_sdf).abs() < 0.01,
-                "i: {}: {} {}",
-                i,
-                sdf,
-                grid_sdf
+                "i: {i}: {sdf} {grid_sdf}"
             );
         }
     }

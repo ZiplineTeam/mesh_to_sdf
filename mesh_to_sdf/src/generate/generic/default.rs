@@ -110,7 +110,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use itertools::Itertools;
 
     #[test]
@@ -147,7 +146,7 @@ mod tests {
         // Same check but for the acceleration structure.
         let sdf_acceleration = query_sdf_default(&acceleration, &query_points);
         for (sdf, baseline) in sdf_acceleration.iter().zip(sdf.iter()) {
-            assert!(sdf == baseline, "{} != {}", sdf, baseline); // should be identical - exact same algorithm
+            assert!(sdf == baseline, "{sdf} != {baseline}"); // should be identical - exact same algorithm
         }
     }
 }

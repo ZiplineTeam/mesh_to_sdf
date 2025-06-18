@@ -146,6 +146,8 @@ mod point;
 pub mod serde;
 
 pub use generate::grid::generate_grid_sdf;
+pub use generate::mesh_check::check_mesh_triangle_list;
+pub use generate::generic::rtree_bvh::query_vector_to_closest_point_rtree_bvh; // TODO: Should make a generic function which works for all acceleration methods
 pub use grid::{Grid, SnapResult};
 pub use point::Point;
 
@@ -283,6 +285,16 @@ pub enum AccelerationMethod {
     RtreeBvh,
 }
 
+/// A list of all acceleration methods - useful if you want to test something across all of them.
+pub const ALL_SDF_ACCELERATION_METHODS: [AccelerationMethod; 6] = [
+    AccelerationMethod::None(SignMethod::Raycast),
+    AccelerationMethod::None(SignMethod::Normal),
+    AccelerationMethod::Bvh(SignMethod::Raycast),
+    AccelerationMethod::Bvh(SignMethod::Normal),
+    AccelerationMethod::Rtree,
+    AccelerationMethod::RtreeBvh,
+];
+
 /// Acceleration structures to store mesh data for later use.
 ///
 /// Obtained from a mesh via [`build_sdf_acceleration`].
@@ -298,7 +310,6 @@ pub enum SdfAccelerationMesh<V: Point, I: Copy + Into<u32> + Sync + Send> {
     /// Corresponds to [`AccelerationMethod::RtreeBvh`]
     RtreeBvh(SdfAccelerationRtreeBvh<V>),
 }
-
 
 /// Compare two signed distances, taking into account floating point errors and signs.
 fn compare_distances(a: f32, b: f32) -> core::cmp::Ordering {
@@ -482,18 +493,11 @@ mod tests {
 
     #[test]
     fn test_mesh_waterproof() {
-        for accel_method in [
-            AccelerationMethod::None(SignMethod::Raycast),
-            AccelerationMethod::None(SignMethod::Normal),
-            AccelerationMethod::Bvh(SignMethod::Raycast),
-            AccelerationMethod::Bvh(SignMethod::Normal),
-            AccelerationMethod::Rtree,
-            AccelerationMethod::RtreeBvh,
-        ] { // TODO: is there a better way to always iterate through all the acceleration methods?
+        for accel_method in ALL_SDF_ACCELERATION_METHODS {
             let indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
             let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
             let topology = Topology::TriangleList(Some(&indices));
-            let point_five_expected_distence = (0.5 / (std::f32::consts::FRAC_1_SQRT_2 * std::f32::consts::FRAC_1_SQRT_2 + 1.0 * 1.0_f32).sqrt()) * std::f32::consts::FRAC_1_SQRT_2;
+            let point_five_expected_distance = (0.5 / core::f32::consts::FRAC_1_SQRT_2.hypot(1.0)) * core::f32::consts::FRAC_1_SQRT_2;
             let query_points_and_strings = [
                 ([0.0, 0.0, 0.0], 0.0, "when we're on one of the corners"),
                 ([0.5, 0.0, 0.0], 0.0, "when we're on one of the edges"),
@@ -502,13 +506,13 @@ mod tests {
                 ([0.2, 0.2, -0.05], -0.05, "when we're slightly below the 0-plane (inside the object)"),
                 ([1.0, 1.0, 0.05], (0.05*0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt(), "when we're above the plane, but off to the side (outside the object)"),
                 ([1.0, 1.0, -0.05], (-0.05*-0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt(), "when we're below the plane, but off to the side (outside the object)"),
-                ([1.0, 1.0, 0.0], (0.5_f32*0.5 + 0.5*0.5_f32).sqrt(), "when we're exactly on the plane, but off to the side (outside the object)"),
+                ([1.0, 1.0, 0.0], 0.5_f32.hypot(0.5), "when we're exactly on the plane, but off to the side (outside the object)"),
                 ([0.0, 0.0, -1.05], 0.05, "when we're directly below the lowest point (outside the object)"),
                 ([0.0, 0.0, -0.95], 0.0, "when we're directly above the lowest point (inside the object)"),
-                ([0.5, 0.5, -0.5], point_five_expected_distence, "when we're in front of the triangle (outside the object)"),
-                ([0.5 - 1e-6, 0.5, -0.5], point_five_expected_distence, "when we're in front of the triangle (outside the object) (1)"), // we could be in front of any of the faces here, so make sure we're picking the right one
-                ([0.5, 0.5 - 1e-6, -0.5], point_five_expected_distence, "when we're in front of the triangle (outside the object) (2)"),
-                ([0.5, 0.5, -0.5 - 1e-6], point_five_expected_distence, "when we're in front of the triangle (outside the object) (3)"),
+                ([0.5, 0.5, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object)"),
+                ([0.5 - 1e-6, 0.5, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object) (1)"), // we could be in front of any of the faces here, so make sure we're picking the right one
+                ([0.5, 0.5 - 1e-6, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object) (2)"),
+                ([0.5, 0.5, -0.5 - 1e-6], point_five_expected_distance, "when we're in front of the triangle (outside the object) (3)"),
             ];
 
             for (query_point, expected_sdf, expected_string) in query_points_and_strings {
@@ -532,7 +536,7 @@ mod tests {
         let sdf = generate_sdf(&vertices, topology, &[[1.0_f32, 1.0_f32, -0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
         assert!(sdf.len() == 1, "Expected sdf to have one value");
         assert_eq!(sdf[0], (0.05*0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt());
-        // Well, it worked! So I guess it's not as sensitive as expected.
+        // Well, it worked! So I guess it's not as sensitive as expected. I was expecting it to fail.
     }
 
     #[test]
@@ -547,14 +551,14 @@ mod tests {
         let sdf = generate_sdf(&vertices, topology, &[[0.2_f32, 0.2_f32, 0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
         assert!(sdf.len() == 1, "Expected sdf to have one value");
         assert_eq!(sdf[0], 0.05);
-        // Well, it worked! So I guess it's not as sensitive as expected.
+        // Well, it worked! So I guess it's not as sensitive as expected. I was expecting it to fail.
     }
 
     #[test]
     #[should_panic]
     fn test_mesh_bad_index() {
         let mut indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
-        assert!(indices.len() < 100, "Too many faces");
+        assert!(indices.len() < 100, "Too many indices");
         indices[0] = 100; // out of bound index
         let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
         let topology = Topology::TriangleList(Some(&indices));
@@ -578,5 +582,103 @@ mod tests {
         let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
         let topology = Topology::TriangleList(Some(&indices));
         let _sdf = generate_sdf(&vertices, topology, &[[0.0_f32, 0.0_f32, f32::NAN]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+    }
+
+    #[test]
+    fn test_all_acceleration_methods_on_cube() {
+        //for accel_method in ALL_SDF_ACCELERATION_METHODS { // TODO: Alas, this does not work! AccelerationMethod::RtreeBvh nearly works, but there are two points where it fails, but if you change the point by a tiny amount, it works. The other Raycast methods do very poorly however.
+        for accel_method in [
+            AccelerationMethod::None(SignMethod::Normal),
+            AccelerationMethod::Bvh(SignMethod::Normal),
+            AccelerationMethod::Rtree] {
+            let vertices = vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ]; // it's a cube! Now we can make faces for it so that it's waterproof and with proper normals
+            let indices: Vec<u32> = vec![
+                0, 2, 4,
+                0, 4, 1, // the bottom face (Z=0)
+                3, 5, 7,
+                3, 7, 6, // the top face (Z=1)
+                0, 1, 5,
+                0, 5, 3, // X=0 axis face
+                2, 6, 7,
+                2, 7, 4, // X=1 axis face
+                0, 3, 6,
+                0, 6, 2, // Y=0 axis face
+                1, 4, 7,
+                1, 7, 5, // Y=1 axis face
+            ];
+
+            // Test with points forming a slightly smaller cube fitting in the mesh one.
+            let points = vec![
+                [0.2, 0.2, 0.2],
+                [0.8, 0.2, 0.2],
+                [0.2, 0.8, 0.2],
+                [0.2, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.8, 0.8],
+            ];
+            let expected_distance = -0.2;
+            let sdf = generate_sdf(&vertices, Topology::TriangleList(Some(&indices)), &points, accel_method);
+            let failed_points: Vec<_> = sdf
+                .iter()
+                .filter(|&distance| (distance - expected_distance).abs() >= 1e-6)
+                .collect();
+
+            if !failed_points.is_empty() {
+                println!("SDF: {sdf:?}");
+                println!("Expected_distance: {expected_distance}");
+                println!("Failed points:");
+                for distance in failed_points {
+                    println!(
+                        "distance = {} (residual = {})",
+                        distance,
+                        (distance - expected_distance).abs()
+                    );
+                }
+                panic!("Points and mesh should intersect at all points");
+            }
+
+            // Then test with points forming a slightly larger cube than the mesh
+            let points = vec![
+                [-0.2, -0.2, -0.2],
+                [1.2, -0.2, -0.2],
+                [-0.2, 1.2, -0.2],
+                [-0.2, -0.2, 1.2],
+                [1.2, 1.2, -0.2],
+                [1.2, -0.2, 1.2],
+                [-0.2, 1.2, 1.2],
+                [1.2, 1.2, 1.2],
+            ];
+            let expected_distance = ((0.2 * 0.2) * 3_f64).sqrt() as f32; // diagonal of 0.2m x 0.2m x 0.2m cube
+            let sdf = generate_sdf(&vertices, Topology::TriangleList(Some(&indices)), &points, accel_method);
+            let failed_points: Vec<_> = sdf
+                .iter()
+                .filter(|&distance| (distance - expected_distance).abs() >= 1e-6)
+                .collect();
+
+            if !failed_points.is_empty() {
+                println!("SDF: {sdf:?}");
+                println!("Expected_distance: {expected_distance}");
+                println!("Failed points:");
+                for distance in failed_points {
+                    println!(
+                        "distance = {} (residual = {})",
+                        distance,
+                        (distance - expected_distance).abs()
+                    );
+                }
+                panic!("Points and mesh should intersect at all points");
+            }
+        }
     }
 }
