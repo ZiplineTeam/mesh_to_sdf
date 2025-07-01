@@ -8,7 +8,7 @@ impl Point for cgmath::Vector3<f32> {
 
     /// Create a new point.
     fn new(x: f32, y: f32, z: f32) -> Self {
-        cgmath::Vector3::new(x, y, z)
+        Self::new(x, y, z)
     }
 
     /// Get the x coordinate.
@@ -52,7 +52,7 @@ impl Point for cgmath::Vector3<f32> {
     }
     /// Cross product of two points.
     fn cross(&self, other: &Self) -> Self {
-        cgmath::Vector3::cross(*self, *other)
+        Self::cross(*self, *other)
     }
     /// Length of the point.
     fn length(&self) -> f32 {

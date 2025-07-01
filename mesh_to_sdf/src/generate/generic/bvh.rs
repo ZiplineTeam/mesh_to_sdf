@@ -44,6 +44,18 @@ impl<V: Point> bvh::bounding_hierarchy::BHShape<f32, 3> for BvhNode<V> {
     }
 }
 
+/// Acceleration structure for the bvh method.
+///
+/// Stores the bvh acceleration structure.
+/// Used to query the sdf for a given query point via [`query_sdf_bvh`].
+#[derive(Clone)]
+pub struct SdfAccelerationBvh<V: Point> {
+    pub vertices: Vec<V>,
+    pub bvh: Bvh<f32, 3>,
+    pub bvh_nodes: Vec<BvhNode<V>>,
+    pub sign_method: SignMethod,
+}
+
 /// Generate a signed distance field from a mesh using a bvh.
 /// Query points are expected to be in the same space as the mesh.
 ///
@@ -56,7 +68,20 @@ pub fn generate_sdf_bvh<V, I>(
     sign_method: SignMethod,
 ) -> Vec<f32>
 where
-    V: Point,
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    let acceleration = build_sdf_acceleration_bvh(vertices, indices, sign_method);
+    query_sdf_bvh(&acceleration, query_points)
+}
+
+pub fn build_sdf_acceleration_bvh<V, I>(
+    vertices: &[V],
+    indices: Topology<I>,
+    sign_method: SignMethod,
+) -> SdfAccelerationBvh<V>
+where
+    V: Point + 'static,
     I: Copy + Into<u32> + Sync + Send,
 {
     let mut bvh_nodes = Topology::get_triangles(vertices, indices)
@@ -73,18 +98,28 @@ where
 
     let bvh = Bvh::build_par(&mut bvh_nodes);
 
+    SdfAccelerationBvh { vertices: vertices.to_vec(), bvh, bvh_nodes, sign_method }
+}
+
+pub fn query_sdf_bvh<V>(
+    acceleration: &SdfAccelerationBvh<V>,
+    query_points: &[V],
+) -> Vec<f32>
+where
+    V: Point + 'static,
+{
     query_points
         .par_iter()
         .map(|point| {
-            let bvh_indices = bvh.nearest_candidates(point, &bvh_nodes);
+            let bvh_indices = acceleration.bvh.nearest_candidates(point, &acceleration.bvh_nodes);
 
             let mut min_dist = f32::MAX;
-            if sign_method == SignMethod::Normal {
+            if acceleration.sign_method == SignMethod::Normal {
                 for index in &bvh_indices {
-                    let triangle = &bvh_nodes[*index];
-                    let a = &vertices[triangle.vertex_indices.0];
-                    let b = &vertices[triangle.vertex_indices.1];
-                    let c = &vertices[triangle.vertex_indices.2];
+                    let triangle = &acceleration.bvh_nodes[*index];
+                    let a = &acceleration.vertices[triangle.vertex_indices.0];
+                    let b = &acceleration.vertices[triangle.vertex_indices.1];
+                    let c = &acceleration.vertices[triangle.vertex_indices.2];
                     let distance = geo::point_triangle_signed_distance(point, a, b, c);
 
                     if compare_distances(min_dist, distance) == Ordering::Greater {
@@ -94,10 +129,10 @@ where
                 min_dist
             } else {
                 for index in &bvh_indices {
-                    let triangle = &bvh_nodes[*index];
-                    let a = &vertices[triangle.vertex_indices.0];
-                    let b = &vertices[triangle.vertex_indices.1];
-                    let c = &vertices[triangle.vertex_indices.2];
+                    let triangle = &acceleration.bvh_nodes[*index];
+                    let a = &acceleration.vertices[triangle.vertex_indices.0];
+                    let b = &acceleration.vertices[triangle.vertex_indices.1];
+                    let c = &acceleration.vertices[triangle.vertex_indices.2];
                     let distance = geo::point_triangle_distance(point, a, b, c);
 
                     min_dist = min_dist.min(distance);
@@ -116,11 +151,11 @@ where
                         direction,
                     );
                     let mut intersection_count = 0;
-                    let hitcast = bvh.traverse(&ray, &bvh_nodes);
+                    let hitcast = acceleration.bvh.traverse(&ray, &acceleration.bvh_nodes);
                     for bvh_node in hitcast {
-                        let a = &vertices[bvh_node.vertex_indices.0];
-                        let b = &vertices[bvh_node.vertex_indices.1];
-                        let c = &vertices[bvh_node.vertex_indices.2];
+                        let a = &acceleration.vertices[bvh_node.vertex_indices.0];
+                        let b = &acceleration.vertices[bvh_node.vertex_indices.1];
+                        let c = &acceleration.vertices[bvh_node.vertex_indices.2];
                         let intersect =
                             geo::ray_triangle_intersection_aligned(point, [a, b, c], alignment);
                         if intersect.is_some() {
@@ -143,6 +178,7 @@ where
         })
         .collect()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -177,6 +213,12 @@ mod tests {
             AccelerationMethod::None(SignMethod::Raycast),
         );
 
+        let acceleration = build_sdf_acceleration_bvh(
+            &vertices,
+            crate::Topology::TriangleList(Some(indices)),
+            SignMethod::Raycast,
+        );
+
         for (idx, (bvh, sdf)) in bvh_sdf.iter().zip(sdf.iter()).enumerate() {
             assert!(
                 (bvh - sdf).abs() < 0.01,
@@ -185,6 +227,11 @@ mod tests {
                 bvh,
                 sdf
             );
+        }
+        // Same check but for the acceleration structure.
+        let sdf_acceleration = query_sdf_bvh(&acceleration, &query_points);
+        for (sdf, baseline) in sdf_acceleration.iter().zip(bvh_sdf.iter()) {
+            assert!(sdf == baseline, "{sdf} != {baseline}"); // should be identical - exact same algorithm
         }
     }
 
@@ -301,10 +348,7 @@ mod tests {
             // i: 1742: 0.09342232 -0.094851956
             assert!(
                 (sdf - grid_sdf).abs() < 0.01,
-                "i: {}: {} {}",
-                i,
-                sdf,
-                grid_sdf
+                "i: {i}: {sdf} {grid_sdf}"
             );
         }
     }

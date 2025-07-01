@@ -1,5 +1,4 @@
 //! Benchmark for the `generate_sdf` function
-use easy_gltf::model::Vertex;
 use itertools::{Itertools, MinMaxResult};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -188,7 +187,7 @@ fn criterion_benchmark_big(c: &mut Criterion) {
 
     let mut vertices = vec![];
     let mut indices = vec![];
-    for model in gltf.first().unwrap().models.iter() {
+    for model in &gltf.first().unwrap().models {
         let len = vertices.len();
         vertices.extend(
             model

@@ -1,7 +1,18 @@
 //! Module containing the `generate_sdf_default` function.
 use rayon::prelude::*;
 
-use crate::{compare_distances, geo, Point, SignMethod, Topology};
+use crate::{compare_distances, geo, OwnedTopology, Point, SignMethod, Topology};
+
+/// Acceleration structure for the default method.
+///
+/// Stores the vertices and indices of the mesh.
+/// Used to query the sdf for a given query point via [`query_sdf_default`].
+#[derive(Clone)]
+pub struct SdfAccelerationDefault<V: Point, I: Copy + Into<u32> + Sync + Send> {
+    pub vertices: Vec<V>,
+    pub indices: OwnedTopology<I>,
+    pub sign_method: SignMethod,
+}
 
 /// Generate a signed distance field from a mesh.
 /// Query points are expected to be in the same space as the mesh.
@@ -73,10 +84,32 @@ where
         .collect()
 }
 
+pub fn build_sdf_acceleration_default<V, I>(
+    vertices: &[V],
+    indices: Topology<I>,
+    sign_method: SignMethod,
+) -> SdfAccelerationDefault<V, I>
+where
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    SdfAccelerationDefault { vertices: vertices.to_vec(), indices: indices.convert_to_owned(), sign_method }
+}
+
+pub fn query_sdf_default<V, I>(
+    acceleration: &SdfAccelerationDefault<V, I>,
+    query_points: &[V],
+) -> Vec<f32>
+where
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    generate_sdf_default(&acceleration.vertices, acceleration.indices.as_topology(), query_points, acceleration.sign_method)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use itertools::Itertools;
 
     #[test]
@@ -95,6 +128,10 @@ mod tests {
             &query_points,
             SignMethod::Normal,
         );
+        let acceleration = build_sdf_acceleration_default(
+            &vertices,
+            crate::Topology::TriangleList(Some(indices)),
+            SignMethod::Normal);
 
         // pysdf [0.45216727 -0.6997909   0.45411023] # negative is outside in pysdf
         // mesh_to_sdf [-0.40961263  0.6929414  -0.46345082] # negative is inside in mesh_to_sdf
@@ -105,6 +142,11 @@ mod tests {
         // this is mostly to make sure the results are not completely off.
         for (sdf, baseline) in sdf.iter().zip(baseline.iter()) {
             assert!((sdf - baseline).abs() < 0.1);
+        }
+        // Same check but for the acceleration structure.
+        let sdf_acceleration = query_sdf_default(&acceleration, &query_points);
+        for (sdf, baseline) in sdf_acceleration.iter().zip(sdf.iter()) {
+            assert!(sdf == baseline, "{sdf} != {baseline}"); // should be identical - exact same algorithm
         }
     }
 }

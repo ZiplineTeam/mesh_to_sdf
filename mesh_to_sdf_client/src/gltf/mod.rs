@@ -212,7 +212,7 @@ mod tests {
         let (scenes, data) = load_test_file("tests/complete.glb").unwrap();
         assert_eq!(scenes.len(), 1);
         let scene = &scenes[0];
-        for model_id in scene.models.iter() {
+        for model_id in &scene.models {
             let model = data.models.get(model_id).unwrap();
             match model.mode() {
                 Mode::Triangles | Mode::TriangleFan | Mode::TriangleStrip => {
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn check_camera() {
+    const fn check_camera() {
         // TODO: re-enable direction/position checks by computing global transform.
         // let (scenes, _data) = load("tests/cube.glb").unwrap();
         // let scene = &scenes[0];
@@ -252,7 +252,7 @@ mod tests {
         let (scenes, _data) = load_test_file("tests/cube.glb").unwrap();
         let scene = &scenes[0];
         // TODO: re-enable direction/position checks by computing global transform.
-        for light in scene.lights.iter() {
+        for light in &scene.lights {
             match light {
                 Light::Directional {
                     direction: _,

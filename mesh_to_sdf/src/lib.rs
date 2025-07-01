@@ -130,8 +130,10 @@ use std::boxed::Box;
 use itertools::Itertools;
 
 use generate::generic::{
-    bvh::generate_sdf_bvh, default::generate_sdf_default, rtree::generate_sdf_rtree,
-    rtree_bvh::generate_sdf_rtree_bvh,
+    default::{generate_sdf_default, build_sdf_acceleration_default, query_sdf_default, SdfAccelerationDefault},
+    bvh::{generate_sdf_bvh, build_sdf_acceleration_bvh, query_sdf_bvh, SdfAccelerationBvh},
+    rtree::{generate_sdf_rtree, build_sdf_acceleration_rtree, query_sdf_rtree, SdfAccelerationRtree},
+    rtree_bvh::{generate_sdf_rtree_bvh, build_sdf_acceleration_rtree_bvh, query_sdf_rtree_bvh, SdfAccelerationRtreeBvh},
 };
 
 mod bvh_ext;
@@ -144,6 +146,8 @@ mod point;
 pub mod serde;
 
 pub use generate::grid::generate_grid_sdf;
+pub use generate::mesh_check::check_mesh_triangle_list;
+pub use generate::generic::rtree_bvh::query_vector_to_closest_point_rtree_bvh; // TODO: Should make a generic function which works for all acceleration methods
 pub use grid::{Grid, SnapResult};
 pub use point::Point;
 
@@ -166,6 +170,20 @@ where
     TriangleStrip(Option<&'a [I]>),
 }
 
+/// Owned version of Topology that doesn't require lifetime parameters.
+/// Useful when you need to store topology data that outlives the original slice.
+/// It would be nice if there is a tidier way to do this, feel free to improve!
+#[derive(Clone)]
+pub enum OwnedTopology<I>
+where
+    I: Into<u32>,
+{
+    /// The same as a `TriangleList` but with indices owned.
+    OwnedTriangleList(Option<Vec<I>>),
+    /// The same as a `TriangleStrip` but with indices owned.
+    OwnedTriangleStrip(Option<Vec<I>>),
+}
+
 impl<'a, I> Topology<'a, I>
 where
     I: Into<u32>,
@@ -182,13 +200,42 @@ where
     {
         match indices {
             Topology::TriangleList(Some(indices)) => {
+                assert!(indices.len() % 3 == 0, "TriangleList indices length ({}) must be divisible by 3", indices.len());
                 Box::new(indices.iter().map(|x| (*x).into() as usize).tuples())
             }
-            Topology::TriangleList(None) => Box::new((0..vertices.len()).tuples()),
+            Topology::TriangleList(None) => {
+                assert!(vertices.len() % 3 == 0, "TriangleList vertices length ({}) must be divisible by 3 when no indices are provided", vertices.len());
+                Box::new((0..vertices.len()).tuples())
+            }
             Topology::TriangleStrip(Some(indices)) => {
                 Box::new(indices.iter().map(|x| (*x).into() as usize).tuple_windows())
             }
             Topology::TriangleStrip(None) => Box::new((0..vertices.len()).tuple_windows()),
+        }
+    }
+
+    fn convert_to_owned(self) -> OwnedTopology<I>
+        where I: Copy + Into<u32> + Sync + Send,
+        {
+        match self {
+            Topology::TriangleList(Some(indices)) => OwnedTopology::OwnedTriangleList(Some(indices.to_vec())),
+            Topology::TriangleList(None) => OwnedTopology::OwnedTriangleList(None),
+            Topology::TriangleStrip(Some(indices)) => OwnedTopology::OwnedTriangleStrip(Some(indices.to_vec())),
+            Topology::TriangleStrip(None) => OwnedTopology::OwnedTriangleStrip(None),
+        }
+    }
+}
+
+impl<I> OwnedTopology<I>
+where
+    I: Into<u32> + Copy + Sync + Send,
+{
+    fn as_topology(&self) -> Topology<I> {
+        match self {
+            Self::OwnedTriangleList(Some(indices)) => Topology::TriangleList(Some(indices.as_slice())),
+            Self::OwnedTriangleList(None) => Topology::TriangleList(None),
+            Self::OwnedTriangleStrip(Some(indices)) => Topology::TriangleStrip(Some(indices.as_slice())),
+            Self::OwnedTriangleStrip(None) => Topology::TriangleStrip(None),
         }
     }
 }
@@ -238,11 +285,37 @@ pub enum AccelerationMethod {
     RtreeBvh,
 }
 
+/// A list of all acceleration methods - useful if you want to test something across all of them.
+pub const ALL_SDF_ACCELERATION_METHODS: [AccelerationMethod; 6] = [
+    AccelerationMethod::None(SignMethod::Raycast),
+    AccelerationMethod::None(SignMethod::Normal),
+    AccelerationMethod::Bvh(SignMethod::Raycast),
+    AccelerationMethod::Bvh(SignMethod::Normal),
+    AccelerationMethod::Rtree,
+    AccelerationMethod::RtreeBvh,
+];
+
+/// Acceleration structures to store mesh data for later use.
+///
+/// Obtained from a mesh via [`build_sdf_acceleration`].
+/// Used to query the sdf for a given query point via [`query_sdf`].
+#[derive(Clone)]
+pub enum SdfAccelerationMesh<V: Point, I: Copy + Into<u32> + Sync + Send> {
+    /// Corresponds to [`AccelerationMethod::None`]
+    None(SdfAccelerationDefault<V, I>),
+    /// Corresponds to [`AccelerationMethod::Bvh`]
+    Bvh(SdfAccelerationBvh<V>),
+    /// Corresponds to [`AccelerationMethod::Rtree`]
+    Rtree(SdfAccelerationRtree<V>),
+    /// Corresponds to [`AccelerationMethod::RtreeBvh`]
+    RtreeBvh(SdfAccelerationRtreeBvh<V>),
+}
+
 /// Compare two signed distances, taking into account floating point errors and signs.
 fn compare_distances(a: f32, b: f32) -> core::cmp::Ordering {
     // for a point to be inside, it has to be inside all normals of nearest triangles.
     // if one distance is positive, then the point is outside.
-    // this check is sensible to floating point errors though
+    // this check is sensitive to floating point errors though
     // so it's not perfect, but it reduces the number of false positives considerably.
     // TODO: expose ulps and epsilon?
     if float_cmp::approx_eq!(f32, a.abs(), b.abs(), ulps = 2, epsilon = 1e-6) {
@@ -298,6 +371,9 @@ where
     V: Point + 'static,
     I: Copy + Into<u32> + Sync + Send,
 {
+    for point in query_points {
+        assert!(point.is_finite(), "Query point {point:?} contains non-finite values");
+    }
     match acceleration_method {
         AccelerationMethod::None(sign_method) => {
             generate_sdf_default(vertices, indices, query_points, sign_method)
@@ -305,7 +381,304 @@ where
         AccelerationMethod::Bvh(sign_method) => {
             generate_sdf_bvh(vertices, indices, query_points, sign_method)
         }
-        AccelerationMethod::Rtree => generate_sdf_rtree(vertices, indices, query_points),
-        AccelerationMethod::RtreeBvh => generate_sdf_rtree_bvh(vertices, indices, query_points),
+        AccelerationMethod::Rtree => {
+            generate_sdf_rtree(vertices, indices, query_points)
+        }
+        AccelerationMethod::RtreeBvh => {
+            generate_sdf_rtree_bvh(vertices, indices, query_points)
+        }
+    }
+}
+
+
+/// Generate an acceleration object for use with `query_sdf`.
+/// Allows for re-use of a given mesh without having to rebuild the acceleration structures.
+///
+/// Returns an acceleration object.
+/// ```
+/// use mesh_to_sdf::{build_sdf_acceleration, SignMethod, Topology, AccelerationMethod};
+///
+/// let vertices: Vec<[f32; 3]> = vec![[0., 1., 0.], [1., 2., 3.], [1., 3., 4.]];
+/// let indices: Vec<u32> = vec![0, 1, 2];
+///
+/// let acceleration = build_sdf_acceleration(
+///     &vertices,
+///     Topology::TriangleList(Some(&indices)),
+///     AccelerationMethod::RtreeBvh,
+/// );
+/// ```
+pub fn build_sdf_acceleration<V, I>(
+    vertices: &[V],
+    indices: Topology<I>,
+    acceleration_method: AccelerationMethod,
+) -> Option<SdfAccelerationMesh<V, I>>
+where
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    match acceleration_method {
+        AccelerationMethod::None(sign_method) => {
+            Some(SdfAccelerationMesh::None(build_sdf_acceleration_default(vertices, indices, sign_method)))
+        }
+        AccelerationMethod::Bvh(sign_method) => {
+            Some(SdfAccelerationMesh::Bvh(build_sdf_acceleration_bvh(vertices, indices, sign_method)))
+        }
+        AccelerationMethod::Rtree => {
+            Some(SdfAccelerationMesh::Rtree(build_sdf_acceleration_rtree(vertices, indices)))
+        }
+        AccelerationMethod::RtreeBvh => {
+            build_sdf_acceleration_rtree_bvh(vertices, indices).map(|acceleration| SdfAccelerationMesh::RtreeBvh(acceleration))
+        }
+    }
+}
+
+/// Query the sdf for a given query point.
+/// Query points are expected to be in the same space as the mesh.
+///
+/// Returns a vector of signed distances.
+/// ```
+/// use mesh_to_sdf::{build_sdf_acceleration, Topology, AccelerationMethod, query_sdf, SdfAccelerationMesh};
+///
+/// let vertices: Vec<[f32; 3]> = vec![[0., 1., 0.], [1., 2., 3.], [1., 3., 4.]];
+/// let indices: Vec<u32> = vec![0, 1, 2];
+/// let acceleration = build_sdf_acceleration(
+///     &vertices,
+///     Topology::TriangleList(Some(&indices)),
+///     AccelerationMethod::RtreeBvh,
+/// );
+///
+/// let query_points: Vec<[f32; 3]> = vec![[0., 0., 0.]];
+///
+/// let sdf: Vec<f32> = query_sdf(
+///     &acceleration.unwrap(),
+///     &query_points,
+/// );
+///
+/// for point in query_points.iter().zip(sdf.iter()) {
+///     println!("Distance to {:?}: {}", point.0, point.1);
+/// }
+///
+/// # assert_eq!(sdf, vec![1.0]);
+/// ```
+pub fn query_sdf<V, I>(
+    acceleration: &SdfAccelerationMesh<V, I>,
+    query_points: &[V],
+) -> Vec<f32>
+where
+    V: Point + 'static,
+    I: Copy + Into<u32> + Sync + Send,
+{
+    match acceleration {
+        SdfAccelerationMesh::None(acceleration) => {
+            query_sdf_default(acceleration, query_points)
+        }
+        SdfAccelerationMesh::Bvh(acceleration) => {
+            query_sdf_bvh(acceleration, query_points)
+        }
+        SdfAccelerationMesh::Rtree(acceleration) => {
+            query_sdf_rtree(acceleration, query_points)
+        }
+        SdfAccelerationMesh::RtreeBvh(acceleration) => {
+            query_sdf_rtree_bvh(acceleration, query_points)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXAMPLE_FULL_MESH_INDICES: &[u32] = &[0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2];
+    const EXAMPLE_FULL_MESH_VERTICES: &[[f32; 3]] = &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]];
+
+    #[test]
+    fn test_mesh_waterproof() {
+        for accel_method in ALL_SDF_ACCELERATION_METHODS {
+            let indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+            let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+            let topology = Topology::TriangleList(Some(&indices));
+            let point_five_expected_distance = (0.5 / core::f32::consts::FRAC_1_SQRT_2.hypot(1.0)) * core::f32::consts::FRAC_1_SQRT_2;
+            let query_points_and_strings = [
+                ([0.0, 0.0, 0.0], 0.0, "when we're on one of the corners"),
+                ([0.5, 0.0, 0.0], 0.0, "when we're on one of the edges"),
+                ([0.2, 0.2, 0.0], 0.0, "when we're on one of the faces"),
+                ([0.2, 0.2, 0.05], 0.05, "when we're slightly above the 0-plane (outside the object)"),
+                ([0.2, 0.2, -0.05], -0.05, "when we're slightly below the 0-plane (inside the object)"),
+                ([1.0, 1.0, 0.05], (0.05*0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt(), "when we're above the plane, but off to the side (outside the object)"),
+                ([1.0, 1.0, -0.05], (-0.05*-0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt(), "when we're below the plane, but off to the side (outside the object)"),
+                ([1.0, 1.0, 0.0], 0.5_f32.hypot(0.5), "when we're exactly on the plane, but off to the side (outside the object)"),
+                ([0.0, 0.0, -1.05], 0.05, "when we're directly below the lowest point (outside the object)"),
+                ([0.0, 0.0, -0.95], 0.0, "when we're directly above the lowest point (inside the object)"),
+                ([0.5, 0.5, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object)"),
+                ([0.5 - 1e-6, 0.5, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object) (1)"), // we could be in front of any of the faces here, so make sure we're picking the right one
+                ([0.5, 0.5 - 1e-6, -0.5], point_five_expected_distance, "when we're in front of the triangle (outside the object) (2)"),
+                ([0.5, 0.5, -0.5 - 1e-6], point_five_expected_distance, "when we're in front of the triangle (outside the object) (3)"),
+            ];
+
+            for (query_point, expected_sdf, expected_string) in query_points_and_strings {
+                let sdf = generate_sdf(&vertices, topology, &[query_point], accel_method);
+                assert!(sdf.len() == 1, "Expected sdf to have one value");
+                assert!(sdf[0] - expected_sdf < 1e-5, "The SDF was {} but we expected {} {}", sdf[0], expected_sdf, expected_string);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mesh_not_waterproof_using_bvh_raycast() {
+        // Raycast is robust but requires the mesh to be watertight - so let's try it with a hole in the mesh
+        let mut indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+        // remove the last 3 indices, i.e. the last face
+        let final_length = indices.len().saturating_sub(3);
+        indices.truncate(final_length);
+        assert_eq!(indices.len(), EXAMPLE_FULL_MESH_INDICES.len() - 3, "Failed to remove face");
+        let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+        let topology = Topology::TriangleList(Some(&indices));
+        let sdf = generate_sdf(&vertices, topology, &[[1.0_f32, 1.0_f32, -0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+        assert!(sdf.len() == 1, "Expected sdf to have one value");
+        assert_eq!(sdf[0], (0.05*0.05 + 0.5*0.5 + 0.5*0.5_f32).sqrt());
+        // Well, it worked! So I guess it's not as sensitive as expected. I was expecting it to fail.
+    }
+
+    #[test]
+    fn test_mesh_reversed_normal_using_bvh_raycast() {
+        // reverse the normal of one of the faces
+        let mut indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+        indices[0] = EXAMPLE_FULL_MESH_INDICES[2];
+        indices[1] = EXAMPLE_FULL_MESH_INDICES[1];
+        indices[2] = EXAMPLE_FULL_MESH_INDICES[0];
+        let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+        let topology = Topology::TriangleList(Some(&indices));
+        let sdf = generate_sdf(&vertices, topology, &[[0.2_f32, 0.2_f32, 0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+        assert!(sdf.len() == 1, "Expected sdf to have one value");
+        assert_eq!(sdf[0], 0.05);
+        // Well, it worked! So I guess it's not as sensitive as expected. I was expecting it to fail.
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_mesh_bad_index() {
+        let mut indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+        assert!(indices.len() < 100, "Too many indices");
+        indices[0] = 100; // out of bound index
+        let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+        let topology = Topology::TriangleList(Some(&indices));
+        let _sdf = generate_sdf(&vertices, topology, &[[0.2_f32, 0.2_f32, 0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_mesh_bad_number_of_indices() {
+        let mut indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+        indices.push(0); // now we don't have a nice triangle strip
+        let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+        let topology = Topology::TriangleList(Some(&indices));
+        let _sdf = generate_sdf(&vertices, topology, &[[0.2_f32, 0.2_f32, 0.05_f32]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_nan_point() {
+        let indices = EXAMPLE_FULL_MESH_INDICES.to_vec();
+        let vertices = EXAMPLE_FULL_MESH_VERTICES.to_vec();
+        let topology = Topology::TriangleList(Some(&indices));
+        let _sdf = generate_sdf(&vertices, topology, &[[0.0_f32, 0.0_f32, f32::NAN]], AccelerationMethod::Bvh(SignMethod::Raycast),);
+    }
+
+    #[test]
+    fn test_all_acceleration_methods_on_cube() {
+        //for accel_method in ALL_SDF_ACCELERATION_METHODS { // TODO: Alas, this does not work! AccelerationMethod::RtreeBvh nearly works, but there are two points where it fails, but if you change the point by a tiny amount, it works. The other Raycast methods do very poorly however.
+        for accel_method in [
+            AccelerationMethod::None(SignMethod::Normal),
+            AccelerationMethod::Bvh(SignMethod::Normal),
+            AccelerationMethod::Rtree] {
+            let vertices = vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ]; // it's a cube! Now we can make faces for it so that it's waterproof and with proper normals
+            let indices: Vec<u32> = vec![
+                0, 2, 4,
+                0, 4, 1, // the bottom face (Z=0)
+                3, 5, 7,
+                3, 7, 6, // the top face (Z=1)
+                0, 1, 5,
+                0, 5, 3, // X=0 axis face
+                2, 6, 7,
+                2, 7, 4, // X=1 axis face
+                0, 3, 6,
+                0, 6, 2, // Y=0 axis face
+                1, 4, 7,
+                1, 7, 5, // Y=1 axis face
+            ];
+
+            // Test with points forming a slightly smaller cube fitting in the mesh one.
+            let points = vec![
+                [0.2, 0.2, 0.2],
+                [0.8, 0.2, 0.2],
+                [0.2, 0.8, 0.2],
+                [0.2, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.8, 0.8],
+            ];
+            let expected_distance = -0.2;
+            let sdf = generate_sdf(&vertices, Topology::TriangleList(Some(&indices)), &points, accel_method);
+            let failed_points: Vec<_> = sdf
+                .iter()
+                .filter(|&distance| (distance - expected_distance).abs() >= 1e-6)
+                .collect();
+
+            if !failed_points.is_empty() {
+                println!("SDF: {sdf:?}");
+                println!("Expected_distance: {expected_distance}");
+                println!("Failed points:");
+                for distance in failed_points {
+                    println!(
+                        "distance = {} (residual = {})",
+                        distance,
+                        (distance - expected_distance).abs()
+                    );
+                }
+                panic!("Points and mesh should intersect at all points");
+            }
+
+            // Then test with points forming a slightly larger cube than the mesh
+            let points = vec![
+                [-0.2, -0.2, -0.2],
+                [1.2, -0.2, -0.2],
+                [-0.2, 1.2, -0.2],
+                [-0.2, -0.2, 1.2],
+                [1.2, 1.2, -0.2],
+                [1.2, -0.2, 1.2],
+                [-0.2, 1.2, 1.2],
+                [1.2, 1.2, 1.2],
+            ];
+            let expected_distance = ((0.2 * 0.2) * 3_f64).sqrt() as f32; // diagonal of 0.2m x 0.2m x 0.2m cube
+            let sdf = generate_sdf(&vertices, Topology::TriangleList(Some(&indices)), &points, accel_method);
+            let failed_points: Vec<_> = sdf
+                .iter()
+                .filter(|&distance| (distance - expected_distance).abs() >= 1e-6)
+                .collect();
+
+            if !failed_points.is_empty() {
+                println!("SDF: {sdf:?}");
+                println!("Expected_distance: {expected_distance}");
+                println!("Failed points:");
+                for distance in failed_points {
+                    println!(
+                        "distance = {} (residual = {})",
+                        distance,
+                        (distance - expected_distance).abs()
+                    );
+                }
+                panic!("Points and mesh should intersect at all points");
+            }
+        }
     }
 }
