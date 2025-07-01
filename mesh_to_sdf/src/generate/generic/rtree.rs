@@ -260,10 +260,7 @@ mod tests {
             // Assert we have the same absolute value.
             assert!(
                 (sdf.abs() - grid_sdf.abs()).abs() < 0.01,
-                "i: {}: {} {}",
-                i,
-                sdf,
-                grid_sdf
+                "i: {i}: {sdf} {grid_sdf}"
             );
 
             // Count sign issues.

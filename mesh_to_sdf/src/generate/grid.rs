@@ -775,10 +775,7 @@ mod tests {
             };
             assert!(
                 valid_unsigned && valid_signed,
-                "({} {}) <= {}",
-                distance,
-                neigh_distance,
-                size
+                "({distance} {neigh_distance}) <= {size}"
             );
         };
 

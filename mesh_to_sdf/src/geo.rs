@@ -67,7 +67,7 @@ fn triangle_normal<V: Point>(a: &V, b: &V, c: &V) -> V {
 /// Adapted from Embree.
 /// <https://github.com/embree/embree/blob/master/tutorials/common/math/closest_point.h#L10>
 #[expect(clippy::many_single_char_names)]
-fn closest_point_triangle<V: Point>(p: &V, a: &V, b: &V, c: &V) -> V {
+pub fn closest_point_triangle<V: Point>(p: &V, a: &V, b: &V, c: &V) -> V {
     // Add safety checks for degenerate triangles
     #[allow(clippy::match_same_arms)]
     match (a.eq(b), b.eq(c), a.eq(c)) {
@@ -249,7 +249,7 @@ mod tests {
             let dist = p.dist(&closest);
             let baseline_dist = baseline_point_triangle_distance(&p, &a, &b, &c);
 
-            println!("p: {:?}, a: {:?}, b: {:?}, c: {:?} - {} {}", p, a, b, c, dist, baseline_dist);
+            println!("p: {p:?}, a: {a:?}, b: {b:?}, c: {c:?} - {dist} {baseline_dist}");
             assert!(!dist.is_nan());
             assert!(float_cmp::approx_eq!(f32, dist, baseline_dist, ulps = 5, epsilon = 1e-3));
         }
@@ -276,10 +276,10 @@ mod tests {
                 match (generic_hit, hit) {
                     (None, None) => {}
                     (Some(generic_hit), Some(hit)) => {
-                        assert!(float_cmp::approx_eq!(f32, generic_hit, hit, ulps = 5, epsilon = 1e-3), "generic_hit: {}, hit: {}", generic_hit, hit);
+                        assert!(float_cmp::approx_eq!(f32, generic_hit, hit, ulps = 5, epsilon = 1e-3), "generic_hit: {generic_hit}, hit: {hit}");
                     }
                     _ => {
-                        panic!("generic_hit: {:?}, hit: {:?}", generic_hit, hit);
+                        panic!("generic_hit: {generic_hit:?}, hit: {hit:?}");
                     }
                 }
             }
