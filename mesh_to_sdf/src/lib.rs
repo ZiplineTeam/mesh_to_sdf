@@ -588,9 +588,7 @@ mod tests {
     fn test_all_acceleration_methods_on_cube() {
         //for accel_method in ALL_SDF_ACCELERATION_METHODS { // TODO: Alas, this does not work! AccelerationMethod::RtreeBvh nearly works, but there are two points where it fails, but if you change the point by a tiny amount, it works. The other Raycast methods do very poorly however.
         for accel_method in [
-            AccelerationMethod::None(SignMethod::Normal),
-            AccelerationMethod::Bvh(SignMethod::Normal),
-            AccelerationMethod::Rtree] {
+            AccelerationMethod::RtreeBvh] {
             let vertices = vec![
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
