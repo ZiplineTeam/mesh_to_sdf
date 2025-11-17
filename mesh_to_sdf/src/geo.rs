@@ -162,22 +162,26 @@ pub enum GridAlign {
 /// A ray-triangle intersection test where the ray direction is [1.0, 0.0, 0.0].
 /// This is a specialized version of `ray_triangle_intersection_generic` for faster performance.
 /// This is grid aligned to allow for fast grid traversal.
+///
+/// Behavior:
+/// - Strict interior: unchanged (returns Some(t) when all w's share sign).
+/// - Exact on-edge / on-vertex: resolved deterministically with the top-left rule
+///   in the (y,z) projected plane (no tolerance).
 pub fn ray_triangle_intersection_aligned<V: Point>(
     ray_origin: &V,
     triangle: [&V; 3],
     alignment: GridAlign,
 ) -> Option<f32> {
-    let edge01 = triangle[1].sub(triangle[0]);
-    let edge12 = triangle[2].sub(triangle[1]);
-    let edge20 = triangle[0].sub(triangle[2]);
+    let edge01 = triangle[1].sub(triangle[0]); // v0->v1
+    let edge12 = triangle[2].sub(triangle[1]); // v1->v2
+    let edge20 = triangle[0].sub(triangle[2]); // v2->v0
 
-    let p0 = ray_origin.sub(triangle[0]);
-    let p1 = ray_origin.sub(triangle[1]);
-    let p2 = ray_origin.sub(triangle[2]);
+    let p0 = ray_origin.sub(triangle[0]); // v0->ray
+    let p1 = ray_origin.sub(triangle[1]); // v1->ray
+    let p2 = ray_origin.sub(triangle[2]); // v2->ray
 
     // While named get_x, get_y, get_z, they are rotated around the grid alignment.
-    // x is the ray direction axis.
-    // (y, z) is the triangle projection plane.
+    // x is the ray direction axis. (y, z) is the triangle projection plane.
     let get_y = match alignment {
         GridAlign::X => |v: &V| v.y(),
         GridAlign::Y => |v: &V| v.z(),
@@ -194,24 +198,100 @@ pub fn ray_triangle_intersection_aligned<V: Point>(
         GridAlign::Z => |v: &V| v.z(),
     };
 
-    // 2d cross products on the triangle projection plane.
-    // the weight of vertex 0 is the cross product between ray-vert1 and edge12.
+    // 2D edge-function weights on the (y,z) plane (your original formulation)
+    // w0 corresponds to edge v1->v2 (opposite v0)
+    // w1 corresponds to edge v2->v0 (opposite v1)
+    // w2 corresponds to edge v0->v1 (opposite v2)
     let w0 = get_z(&p1) * get_y(&edge12) - get_y(&p1) * get_z(&edge12);
     let w1 = get_z(&p2) * get_y(&edge20) - get_y(&p2) * get_z(&edge20);
     let w2 = get_z(&p0) * get_y(&edge01) - get_y(&p0) * get_z(&edge01);
 
-    if w0 < 0.0 && w1 < 0.0 && w2 < 0.0 || w0 > 0.0 && w1 > 0.0 && w2 > 0.0 {
-        // the weights have the same sign: inside the triangle.
-        // compute the intersection point.
-        // barycenteric coordinates.
-        // we negate it since the p_i are vert_i -> ray_origin.
+    // Fast strict-interior test (unchanged): all weights share *strictly* the same sign
+    if (w0 < 0.0 && w1 < 0.0 && w2 < 0.0) || (w0 > 0.0 && w1 > 0.0 && w2 > 0.0) {
         let t = -(w0 * get_x(&p0) + w2 * get_x(&p2) + w1 * get_x(&p1)) / (w0 + w1 + w2);
-
         if t > 0.0 {
-            // ray intersection
             return Some(t);
         }
+        return None;
     }
+
+    // ---------- Boundary handling with exact comparisons (no tolerance) ----------
+
+    // Exact “on edge” flags
+    let on0 = w0 == 0.0; // on edge v1->v2
+    let on1 = w1 == 0.0; // on edge v2->v0
+    let on2 = w2 == 0.0; // on edge v0->v1
+
+    // For edge cases, require the other two weights to be non-negative together or non-positive together
+    let same_sign_non_strict = |a: f32, b: f32| (a >= 0.0 && b >= 0.0) || (a <= 0.0 && b <= 0.0);
+
+    // Top-left inclusive predicate on projected (y,z) edge direction.
+    #[inline]
+    fn top_left_inclusive_du_dv(du: f32, dv: f32) -> bool {
+        (dv > 0.0) || (dv == 0.0 && du < 0.0)
+    }
+
+    // Precompute numerator and denominator for t (same as interior path)
+    let t_num = w0 * get_x(&p0) + w2 * get_x(&p2) + w1 * get_x(&p1);
+    let t_den = w0 + w1 + w2;
+
+    #[inline]
+    fn return_t(t_num: f32, t_den: f32) -> Option<f32> {
+        let t = -t_num / t_den;
+        if t > 0.0 { Some(t) } else { None }
+    }
+
+    // Vertex case: two (or three) weights are exactly 0
+    let on_count = (on0 as u8) + (on1 as u8) + (on2 as u8);
+    if on_count >= 2 {
+        // Determine the two incident edges and apply top-left inclusivity.
+        // - (on2 & on0) -> vertex v1; edges: edge01 (v0->v1) and edge12 (v1->v2)
+        // - (on0 & on1) -> vertex v2; edges: edge12 (v1->v2) and edge20 (v2->v0)
+        // - (on1 & on2) -> vertex v0; edges: edge20 (v2->v0) and edge01 (v0->v1)
+        let inclusive = if on2 && on0 {
+            let inc01 = top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01));
+            let inc12 = top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12));
+            inc01 || inc12
+        } else if on0 && on1 {
+            let inc12 = top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12));
+            let inc20 = top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20));
+            inc12 || inc20
+        } else {
+            let inc20 = top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20));
+            let inc01 = top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01));
+            inc20 || inc01
+        };
+
+        if inclusive {
+            return return_t(t_num, t_den);
+        }
+        return None;
+    }
+
+    // Single-edge cases: count only if the other two weights have the same non-strict sign.
+    if on2 && same_sign_non_strict(w0, w1) {
+        // On edge v0->v1  (edge01)
+        if top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01)) {
+            return return_t(t_num, t_den);
+        }
+        return None;
+    }
+    if on0 && same_sign_non_strict(w1, w2) {
+        // On edge v1->v2  (edge12)
+        if top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12)) {
+            return return_t(t_num, t_den);
+        }
+        return None;
+    }
+    if on1 && same_sign_non_strict(w2, w0) {
+        // On edge v2->v0  (edge20)
+        if top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20)) {
+            return return_t(t_num, t_den);
+        }
+        return None;
+    }
+
+    // Otherwise: outside (or on an excluded edge by the top-left rule)
     None
 }
 
