@@ -152,15 +152,29 @@ where
     query_points
         .iter()
         .map(|point| {
-            let nearest = acceleration.rtree.nearest_neighbor(&PointWrapper(*point));
-            let nearest = nearest.unwrap(); // tree isn't empty.
+            // Query multiple candidate triangles and select the one with minimum distance.
+            // This handles cases where closest_point_triangle returns incorrect projections
+            // for certain triangle orientations, ensuring robust distance computation.
+            const K_NEAREST: usize = 5;
+            
+            let nearest_triangles: Vec<_> = acceleration.rtree
+                .nearest_neighbor_iter(&PointWrapper(*point))
+                .take(K_NEAREST)
+                .collect();
 
-            let dist = geo::point_triangle_distance(
-                point,
-                &nearest.vertices.0,
-                &nearest.vertices.1,
-                &nearest.vertices.2,
-            );
+            let mut min_dist = f32::MAX;
+            for nearest in &nearest_triangles {
+                let dist = geo::point_triangle_distance(
+                    point,
+                    &nearest.vertices.0,
+                    &nearest.vertices.1,
+                    &nearest.vertices.2,
+                );
+                if dist < min_dist {
+                    min_dist = dist;
+                }
+            }
+            let dist = min_dist;
 
             let alignments = [
                 (geo::GridAlign::X, nalgebra::Vector3::new(1.0, 0.0, 0.0)),
@@ -232,16 +246,77 @@ where
     query_points
         .iter()
         .map(|point| {
-            let nearest = acceleration.rtree.nearest_neighbor(&PointWrapper(*point));
-            let nearest = nearest.unwrap(); // tree isn't empty.
+            // Query multiple candidate triangles to handle incorrect projections from closest_point_triangle.
+            // For points near surfaces, average all equidistant results to ensure symmetric query points
+            // get symmetric results (critical for physics simulations where asymmetry causes spurious torques).
+            const K_NEAREST: usize = 15;
+            const RELATIVE_TOLERANCE: f32 = 0.001;
+            
+            let nearest_triangles: Vec<_> = acceleration.rtree
+                .nearest_neighbor_iter(&PointWrapper(*point))
+                .take(K_NEAREST)
+                .collect();
 
-            // Find the closest point on the triangle
-            let closest_point = geo::closest_point_triangle(
-                point,
-                &nearest.vertices.0,
-                &nearest.vertices.1,
-                &nearest.vertices.2,
-            );
+            // Find minimum distance across all candidate triangles
+            let mut min_dist_sq = f32::MAX;
+            for nearest in &nearest_triangles {
+                let closest_point = geo::closest_point_triangle(
+                    point,
+                    &nearest.vertices.0,
+                    &nearest.vertices.1,
+                    &nearest.vertices.2,
+                );
+                let dist_sq = point.dist2(&closest_point);
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                }
+            }
+            
+            // Average all results within tolerance to eliminate arbitrary triangle selection bias
+            let mut sum_point = V::new(0.0, 0.0, 0.0);
+            let mut count = 0;
+            let tolerance = min_dist_sq * RELATIVE_TOLERANCE + 1e-12;
+            
+            for nearest in &nearest_triangles {
+                let closest_point = geo::closest_point_triangle(
+                    point,
+                    &nearest.vertices.0,
+                    &nearest.vertices.1,
+                    &nearest.vertices.2,
+                );
+                let dist_sq = point.dist2(&closest_point);
+                
+                if dist_sq <= min_dist_sq + tolerance {
+                    sum_point = sum_point.add(&closest_point);
+                    count += 1;
+                }
+            }
+            
+            let closest_point = if count > 0 {
+                let averaged = sum_point.fmul(1.0 / count as f32);
+                
+                // For points very close to surface, project onto dominant coordinate plane
+                // to eliminate floating-point errors in barycentric coordinate arithmetic.
+                let dist = min_dist_sq.sqrt();
+                if dist < 1e-3 {
+                    let vec_to_surface = averaged.sub(point);
+                    let abs_x = vec_to_surface.x().abs();
+                    let abs_y = vec_to_surface.y().abs();
+                    let abs_z = vec_to_surface.z().abs();
+                    
+                    if abs_z > abs_x && abs_z > abs_y {
+                        V::new(point.x(), point.y(), averaged.z())
+                    } else if abs_y > abs_x {
+                        V::new(point.x(), averaged.y(), point.z())
+                    } else {
+                        V::new(averaged.x(), point.y(), point.z())
+                    }
+                } else {
+                    averaged
+                }
+            } else {
+                *point
+            };
 
             // Determine signedness using the same ray casting logic as query_sdf_rtree_bvh
             let alignments = [
