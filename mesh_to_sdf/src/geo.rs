@@ -159,18 +159,18 @@ pub enum GridAlign {
     Z,
 }
 
-/// A ray-triangle intersection test where the ray direction is [1.0, 0.0, 0.0].
-/// This is a specialized version of `ray_triangle_intersection_generic` for faster performance.
-/// This is grid aligned to allow for fast grid traversal.
-///
-/// Behavior:
-/// - Strict interior: unchanged (returns Some(t) when all w's share sign).
-/// - Exact on-edge / on-vertex: resolved deterministically with the top-left rule
-///   in the (y,z) projected plane (no tolerance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HitKey {
+    Vertex(usize),
+    Edge(usize, usize),
+}
+
 pub fn ray_triangle_intersection_aligned<V: Point>(
     ray_origin: &V,
     triangle: [&V; 3],
     alignment: GridAlign,
+    vertex_indices: Option<(usize, usize, usize)>,
+    seen: Option<&mut std::collections::HashSet<HitKey>>,
 ) -> Option<f32> {
     let edge01 = triangle[1].sub(triangle[0]); // v0->v1
     let edge12 = triangle[2].sub(triangle[1]); // v1->v2
@@ -206,7 +206,6 @@ pub fn ray_triangle_intersection_aligned<V: Point>(
     let w1 = get_z(&p2) * get_y(&edge20) - get_y(&p2) * get_z(&edge20);
     let w2 = get_z(&p0) * get_y(&edge01) - get_y(&p0) * get_z(&edge01);
 
-    // Fast strict-interior test (unchanged): all weights share *strictly* the same sign
     if (w0 < 0.0 && w1 < 0.0 && w2 < 0.0) || (w0 > 0.0 && w1 > 0.0 && w2 > 0.0) {
         let t = -(w0 * get_x(&p0) + w2 * get_x(&p2) + w1 * get_x(&p1)) / (w0 + w1 + w2);
         if t > 0.0 {
@@ -240,58 +239,94 @@ pub fn ray_triangle_intersection_aligned<V: Point>(
         let t = -t_num / t_den;
         if t > 0.0 { Some(t) } else { None }
     }
+    
+    #[inline]
+    fn try_dedup_and_return(
+        t_num: f32,
+        t_den: f32,
+        key: HitKey,
+        vertex_indices: Option<(usize, usize, usize)>,
+        seen: Option<&mut std::collections::HashSet<HitKey>>,
+    ) -> Option<f32> {
+        let t = -t_num / t_den;
+        if t > 0.0 {
+            if let (Some(_), Some(seen_set)) = (vertex_indices, seen) {
+                if !seen_set.insert(key) {
+                    return None;
+                }
+            }
+            Some(t)
+        } else {
+            None
+        }
+    }
 
-    // Vertex case: two (or three) weights are exactly 0
     let on_count = (on0 as u8) + (on1 as u8) + (on2 as u8);
     if on_count >= 2 {
-        // Determine the two incident edges and apply top-left inclusivity.
-        // - (on2 & on0) -> vertex v1; edges: edge01 (v0->v1) and edge12 (v1->v2)
-        // - (on0 & on1) -> vertex v2; edges: edge12 (v1->v2) and edge20 (v2->v0)
-        // - (on1 & on2) -> vertex v0; edges: edge20 (v2->v0) and edge01 (v0->v1)
-        let inclusive = if on2 && on0 {
+        let (vertex_idx, inclusive) = if on2 && on0 {
             let inc01 = top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01));
             let inc12 = top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12));
-            inc01 || inc12
+            (1, inc01 || inc12)
         } else if on0 && on1 {
             let inc12 = top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12));
             let inc20 = top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20));
-            inc12 || inc20
+            (2, inc12 || inc20)
         } else {
             let inc20 = top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20));
             let inc01 = top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01));
-            inc20 || inc01
+            (0, inc20 || inc01)
         };
 
         if inclusive {
-            return return_t(t_num, t_den);
+            if let Some(indices) = vertex_indices {
+                let v = match vertex_idx {
+                    0 => indices.0,
+                    1 => indices.1,
+                    2 => indices.2,
+                    _ => unreachable!(),
+                };
+                return try_dedup_and_return(t_num, t_den, HitKey::Vertex(v), vertex_indices, seen);
+            } else {
+                return return_t(t_num, t_den);
+            }
         }
         return None;
     }
 
-    // Single-edge cases: count only if the other two weights have the same non-strict sign.
     if on2 && same_sign_non_strict(w0, w1) {
-        // On edge v0->v1  (edge01)
         if top_left_inclusive_du_dv(get_y(&edge01), get_z(&edge01)) {
-            return return_t(t_num, t_den);
+            if let Some(indices) = vertex_indices {
+                let (v0, v1) = (indices.0, indices.1);
+                return try_dedup_and_return(t_num, t_den, HitKey::Edge(v0.min(v1), v0.max(v1)), vertex_indices, seen);
+            } else {
+                return return_t(t_num, t_den);
+            }
         }
         return None;
     }
     if on0 && same_sign_non_strict(w1, w2) {
-        // On edge v1->v2  (edge12)
         if top_left_inclusive_du_dv(get_y(&edge12), get_z(&edge12)) {
-            return return_t(t_num, t_den);
+            if let Some(indices) = vertex_indices {
+                let (v0, v1) = (indices.1, indices.2);
+                return try_dedup_and_return(t_num, t_den, HitKey::Edge(v0.min(v1), v0.max(v1)), vertex_indices, seen);
+            } else {
+                return return_t(t_num, t_den);
+            }
         }
         return None;
     }
     if on1 && same_sign_non_strict(w2, w0) {
-        // On edge v2->v0  (edge20)
         if top_left_inclusive_du_dv(get_y(&edge20), get_z(&edge20)) {
-            return return_t(t_num, t_den);
+            if let Some(indices) = vertex_indices {
+                let (v0, v1) = (indices.2, indices.0);
+                return try_dedup_and_return(t_num, t_den, HitKey::Edge(v0.min(v1), v0.max(v1)), vertex_indices, seen);
+            } else {
+                return return_t(t_num, t_den);
+            }
         }
         return None;
     }
 
-    // Otherwise: outside (or on an excluded edge by the top-left rule)
     None
 }
 
@@ -351,7 +386,7 @@ mod tests {
                 (GridAlign::Z, [0.0, 0.0, 1.0]),
             ] {
                 let generic_hit = ray_triangle_intersection_generic(&p, &dir, &a, &b, &c);
-                let hit = ray_triangle_intersection_aligned(&p, [&a, &b, &c], align);
+                let hit = ray_triangle_intersection_aligned(&p, [&a, &b, &c], align, None, None);
 
                 match (generic_hit, hit) {
                     (None, None) => {}
@@ -386,6 +421,64 @@ mod tests {
 
         ray_dir = [0.3, -1.0, -0.2];
         assert!(ray_triangle_intersection_generic(&ray_origin, &ray_dir, &a, &b, &c).is_none());
+    }
+
+    #[test]
+    fn test_deduplication() {
+        use std::collections::HashSet;
+        
+        let v0 = [0.0, 0.0, 0.0];
+        let v1 = [1.0, 0.0, 0.0];
+        let v2 = [0.0, 1.0, 0.0];
+
+        // Test interior hit - not deduplicated
+        let interior = [0.3, 0.3, -1.0];
+        let mut seen = HashSet::new();
+        
+        let hit1 = ray_triangle_intersection_aligned(&interior, [&v0, &v1, &v2], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen));
+        assert!(hit1.is_some());
+        
+        let hit2 = ray_triangle_intersection_aligned(&interior, [&v0, &v1, &v2], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen));
+        assert!(hit2.is_some(), "Interior hits are not deduplicated");
+        assert_eq!(seen.len(), 0, "Interior hits don't add to seen set");
+        
+        // Test edge hit - should be deduplicated
+        // Edge v0->v1 with top-left rule: dv > 0 (vertical edge going up)
+        let v0_edge = [0.0, 0.0, 0.0];
+        let v1_edge = [0.0, 1.0, 0.0];
+        let v2_edge = [1.0, 0.0, 0.0];
+        
+        let on_edge = [0.0, 0.5, -1.0];  // On edge v0->v1
+        let mut seen_edge = HashSet::new();
+        
+        let hit3 = ray_triangle_intersection_aligned(&on_edge, [&v0_edge, &v1_edge, &v2_edge], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen_edge));
+        assert!(hit3.is_some(), "First edge hit should register");
+        assert_eq!(seen_edge.len(), 1, "Edge hit should add to seen set");
+        assert!(seen_edge.contains(&HitKey::Edge(0, 1)), "Should contain edge (0,1)");
+        
+        let hit4 = ray_triangle_intersection_aligned(&on_edge, [&v0_edge, &v1_edge, &v2_edge], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen_edge));
+        assert!(hit4.is_none(), "Second edge hit should be deduplicated");
+        assert_eq!(seen_edge.len(), 1, "Seen set should still have 1 entry");
+        assert!(seen_edge.contains(&HitKey::Edge(0, 1)), "Should still contain edge (0,1)");
+        
+        // Test vertex hit - should be deduplicated
+        // Vertex at v1 with both incident edges passing top-left rule
+        let v0_vtx = [0.0, 0.0, 0.0];
+        let v1_vtx = [1.0, 0.0, 0.0];
+        let v2_vtx = [0.5, 1.0, 0.0];
+        
+        let on_vertex = [1.0, 0.0, -1.0];  // On vertex v1
+        let mut seen_vtx = HashSet::new();
+        
+        let hit5 = ray_triangle_intersection_aligned(&on_vertex, [&v0_vtx, &v1_vtx, &v2_vtx], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen_vtx));
+        assert!(hit5.is_some(), "First vertex hit should register");
+        assert_eq!(seen_vtx.len(), 1, "Vertex hit should add to seen set");
+        assert!(seen_vtx.contains(&HitKey::Vertex(1)), "Should contain vertex 1");
+        
+        let hit6 = ray_triangle_intersection_aligned(&on_vertex, [&v0_vtx, &v1_vtx, &v2_vtx], GridAlign::Z, Some((0, 1, 2)), Some(&mut seen_vtx));
+        assert!(hit6.is_none(), "Second vertex hit should be deduplicated");
+        assert_eq!(seen_vtx.len(), 1, "Seen set should still have 1 entry");
+        assert!(seen_vtx.contains(&HitKey::Vertex(1)), "Should still contain vertex 1");
     }
 
     #[test]

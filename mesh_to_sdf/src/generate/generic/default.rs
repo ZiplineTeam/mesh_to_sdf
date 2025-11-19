@@ -39,13 +39,20 @@ where
         .par_iter()
         .map(|query| {
             Topology::get_triangles(vertices, indices)
-                .map(|(i, j, k)| (&vertices[i], &vertices[j], &vertices[k]))
-                .map(|(a, b, c)| match sign_method {
+                .map(|(i, j, k)| ((i, j, k), (&vertices[i], &vertices[j], &vertices[k])))
+                .map(|(indices, (a, b, c))| match sign_method {
                     // Raycast: returns (distance, ray_intersection)
+                    // Note: No deduplication here since we only cast one ray direction
                     SignMethod::Raycast => (
                         geo::point_triangle_distance(query, a, b, c),
-                        geo::ray_triangle_intersection_aligned(query, [a, b, c], geo::GridAlign::X)
-                            .is_some(),
+                        geo::ray_triangle_intersection_aligned(
+                            query,
+                            [a, b, c],
+                            geo::GridAlign::X,
+                            None,
+                            None,
+                        )
+                        .is_some(),
                     ),
                     // Normal: returns (signed_distance, false)
                     SignMethod::Normal => {

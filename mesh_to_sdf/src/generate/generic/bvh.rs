@@ -151,13 +151,19 @@ where
                         direction,
                     );
                     let mut intersection_count = 0;
+                    let mut seen = std::collections::HashSet::new();
                     let hitcast = acceleration.bvh.traverse(&ray, &acceleration.bvh_nodes);
                     for bvh_node in hitcast {
                         let a = &acceleration.vertices[bvh_node.vertex_indices.0];
                         let b = &acceleration.vertices[bvh_node.vertex_indices.1];
                         let c = &acceleration.vertices[bvh_node.vertex_indices.2];
-                        let intersect =
-                            geo::ray_triangle_intersection_aligned(point, [a, b, c], alignment);
+                        let intersect = geo::ray_triangle_intersection_aligned(
+                            point,
+                            [a, b, c],
+                            alignment,
+                            Some(bvh_node.vertex_indices),
+                            Some(&mut seen),
+                        );
                         if intersect.is_some() {
                             intersection_count += 1;
                         }

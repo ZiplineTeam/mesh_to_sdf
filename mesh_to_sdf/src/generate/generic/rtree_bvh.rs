@@ -11,6 +11,7 @@ use super::rtree::PointWrapper;
 #[derive(Clone)]
 pub struct RtreeBvhNode<V: Point> {
     vertices: (V, V, V),
+    vertex_indices: (usize, usize, usize),
     bounding_box: (V, V),
     node_index: usize,
 }
@@ -112,6 +113,7 @@ where
             vertices[triangle.1],
             vertices[triangle.2],
         ),
+        vertex_indices: triangle,
         node_index: 0,
         bounding_box: geo::triangle_bounding_box(
             &vertices[triangle.0],
@@ -173,13 +175,19 @@ where
                     direction,
                 );
                 let mut intersection_count = 0;
+                let mut seen = std::collections::HashSet::new();
                 let hitcast = acceleration.bvh.traverse(&ray, &acceleration.bvh_nodes);
                 for bvh_node in hitcast {
                     let a = &bvh_node.vertices.0;
                     let b = &bvh_node.vertices.1;
                     let c = &bvh_node.vertices.2;
-                    let intersect =
-                        geo::ray_triangle_intersection_aligned(point, [a, b, c], alignment);
+                    let intersect = geo::ray_triangle_intersection_aligned(
+                        point,
+                        [a, b, c],
+                        alignment,
+                        Some(bvh_node.vertex_indices),
+                        Some(&mut seen),
+                    );
                     if intersect.is_some() {
                         intersection_count += 1;
                     }
@@ -249,13 +257,19 @@ where
                     direction,
                 );
                 let mut intersection_count = 0;
+                let mut seen = std::collections::HashSet::new();
                 let hitcast = acceleration.bvh.traverse(&ray, &acceleration.bvh_nodes);
                 for bvh_node in hitcast {
                     let a = &bvh_node.vertices.0;
                     let b = &bvh_node.vertices.1;
                     let c = &bvh_node.vertices.2;
-                    let intersect =
-                        geo::ray_triangle_intersection_aligned(point, [a, b, c], alignment);
+                    let intersect = geo::ray_triangle_intersection_aligned(
+                        point,
+                        [a, b, c],
+                        alignment,
+                        Some(bvh_node.vertex_indices),
+                        Some(&mut seen),
+                    );
                     if intersect.is_some() {
                         intersection_count += 1;
                     }

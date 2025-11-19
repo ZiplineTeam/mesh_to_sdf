@@ -593,14 +593,20 @@ fn compute_raycasts<V: Point>(
             candidates.len() as u32,
             core::sync::atomic::Ordering::Relaxed,
         );
+        
+        let mut seen = std::collections::HashSet::new();
         for candidate in candidates {
             let a = &vertices[candidate.vertex_indices.0];
             let b = &vertices[candidate.vertex_indices.1];
             let c = &vertices[candidate.vertex_indices.2];
 
-            if let Some(distance) =
-                geo::ray_triangle_intersection_aligned(&cell_pos, [a, b, c], data.direction)
-            {
+            if let Some(distance) = geo::ray_triangle_intersection_aligned(
+                &cell_pos,
+                [a, b, c],
+                data.direction,
+                Some(candidate.vertex_indices),
+                Some(&mut seen),
+            ) {
                 let direction_index = data.direction as usize;
                 let cell_count = distance / grid.get_cell_size().get(direction_index);
                 let cell_count =
